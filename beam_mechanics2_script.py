@@ -57,7 +57,6 @@ mhat_sym = sp.Matrix([-sp.cos(psi_sym), sp.sin(psi_sym), 0])
 
 m_mag_sym = sp.symbols('m_mag', real=True)  
 dR_dtheta_mpsi = dR_dtheta * (m_mag_sym * mhat_sym) 
-print(dR_dtheta_mpsi)
 beam_bending_integral_psi = (dR_dtheta_mpsi.T @ B_vec_sym)[0] + (dx_dtheta.T @ Bg_vec_sym)[0]
 
 beam_bending_integral_psi_eval = sp.lambdify(
@@ -185,6 +184,166 @@ def _as_vec3(x):
     """Return x as a 1-D length-3 float vector."""
     a = np.asarray(x, dtype=float)
     return a.reshape(-1)[:3]
+    beam_bending_integral_psi_eval = sp.lambdify(
+        (phi_sym, s_sym, theta_sym, Bx_sym, By_sym, Bz_sym,
+        gBx_sym, gBy_sym, gBz_sym, psi_sym, m_mag_sym),
+        beam_bending_integral_psi, modules='numpy'
+    )
+
+df_dtheta_psi_fn = sp.lambdify(
+    (phi_sym, s_sym, theta_sym, Bx_sym, By_sym, Bz_sym,
+    gBx_sym, gBy_sym, gBz_sym, psi_sym, m_mag_sym),
+    sp.diff(beam_bending_integral_psi, theta_sym),
+    modules='numpy'
+)
+
+df_dpsi_fn = sp.lambdify(
+    (phi_sym, s_sym, theta_sym, Bx_sym, By_sym, Bz_sym,
+    gBx_sym, gBy_sym, gBz_sym, psi_sym, m_mag_sym),
+    sp.diff(beam_bending_integral_psi, psi_sym),
+    modules='numpy'
+)
+
+
+# %% [markdown]
+# The magnetic field is evaluated at one static point. Unlike beam mechanics 3 the field does not integrate with changing spatial gradient. This also does not depend on psi as psi is fixed and set to 0.
+
+# %%
+def tip_frame_m_world(theta_val, mL):
+    c, s = np.cos(theta_val), np.sin(theta_val)
+    Rz   = np.array([[c,-s,0.0],[s,c,0.0],[0.0,0.0,1.0]], float)
+    return Rz @ np.array([mL, 0.0, 0.0], float)
+def evalulate_magnetic_field2(p_now, MAGNET_M, base_dir=np.array([-1.0,0.0,0.0])):
+    p_now = np.asarray(p_now, float)
+    m_base = np.asarray(base_dir, float)
+    m_base = np.array([-np.cos(0), np.sin(0), 0.0], dtype=float)
+    T = magnetic_field_bar(p_now, MU0, MAGNET_M)
+    B_vec = (T @ m_base).ravel()
+    test = T@np.array([1,1,1])
+    ex, ey, ez = np.eye(3)
+    Gx = -1*magnetic_field_gradient(p_now, m_base, MU0, MAGNET_M)
+    Gy = -1*magnetic_field_gradient(p_now, m_base, MU0, MAGNET_M)
+    Gz = -1*magnetic_field_gradient(p_now, m_base, MU0, MAGNET_M)
+    m_world = tip_frame_m_world(0, magnetisation)
+    G = np.column_stack([(Gx@ m_world).ravel(),
+                        (Gy@ m_world).ravel(),
+                        (Gz@ m_world).ravel()])
+    return G, test
+
+def magnetic_field_dynamic2(s_val, theta_val, p_vec, phi, debug_field=False):
+    Rx = np.array([[1,0,0],
+                [0, np.cos(phi), -np.sin(phi)],
+                [0, np.sin(phi),  np.cos(phi)]], float)
+    Rm_local = np.array([-np.cos(theta_val), np.sin(theta_val), 0.0], float)
+    # Rm = Rx @ Rm_local
+    Rm = np.array([-np.cos(0), -np.sin(0), 0.0], dtype=float)
+    p_now = _as_vec3(p_vec) + float(s_val) * Rm
+    G, B_vec = evalulate_magnetic_field2(p_now, MAGNET_M)
+    # Bg_Rm = (G[1,0]).ravel()
+    Bg_Rm = (G[1,:]).ravel()
+
+    if debug_field == True:
+        print(f"Magnetic field: {B_vec}")
+        print(f"Magnetic field gradient: {Bg_Rm}")
+    return B_vec, Bg_Rm
+
+# %% [markdown]
+# A comparison is made between the finite difference and anlytical derivation.Very similar to beam mechanics 2 the jacoibian is taken by linearising at different points and forcing the boundary conditions.
+
+# %%
+def f_theta_analytic(s_val, theta_val, psi, p_vec, phi):
+    B_vec, Bg_Rm = magnetic_field_dynamic2(s_val, theta_val, p_vec, phi)
+    Bx, By, Bz = map(float, np.ravel(B_vec))
+    gBx, gBy, gBz = map(float, np.ravel(Bg_Rm))
+    return -(A_val/(E_val*I_val)) * float(df_dtheta_psi_fn(
+        phi, float(s_val), float(theta_val),
+        Bx, By, Bz, gBx, gBy, gBz,
+        float(psi), magnetisation
+    ))
+
+def f_psi_analytic(s_val, theta_val, psi, p_vec, phi):
+    B_vec, Bg_Rm = magnetic_field_dynamic2(s_val, theta_val, p_vec, phi)
+    Bx, By, Bz = map(float, np.ravel(B_vec))
+    gBx, gBy, gBz = map(float, np.ravel(Bg_Rm))
+    return -(A_val/(E_val*I_val)) * float(df_dpsi_fn(
+        phi, float(s_val), float(theta_val),
+        Bx, By, Bz, gBx, gBy, gBz,
+        float(psi), magnetisation
+    ))
+
+
+# %%
+def tip_sensitivity_with_shooting(solution_beam, psi, p_vec, phi):
+    """
+    Returns dθ(L)/dψ under the terminal constraint θ'(L)=0.
+    Integrates u and w tangents along the stored θ(s) trajectory.
+    """
+    s_grid = solution_beam.t
+    theta_grid = np.asarray(solution_beam.y)[0]
+
+    def rhs_pair(s, y):
+        theta_s = np.interp(s, s_grid, theta_grid)
+        u, u1, w, w1 = y
+        ft = f_theta_analytic(s, theta_s, psi, p_vec, phi)
+        fp = f_psi_analytic  (s, theta_s, psi, p_vec, phi)
+        return np.array([u1, ft*u + fp, w1, ft*w], dtype=float)
+
+    y0 = [0.0, 0.0, 0.0, 1.0]
+    sol = solve_ivp(rhs_pair, (s_grid[0], s_grid[-1]), y0, t_eval=[s_grid[-1]], max_step=LENGTH/800)
+    U = np.asarray(sol.y)[:, -1]
+    uL, u1L, wL, w1L = map(float, U)
+
+    dk_dpsi = - u1L / (w1L + 1e-12)
+    dthetaL_dpsi = uL + wL * dk_dpsi
+    return dthetaL_dpsi
+
+
+# %%
+mhat_ref_sym = sp.Matrix([-1, 0, 0])     
+vbar_sym = ((dR_dtheta * (m_mag_sym * mhat_ref_sym)).T @ B_vec_sym)[0] + (dx_dtheta.T @ Bg_vec_sym)[0]
+
+vbar_eval_fn = sp.lambdify(
+    (phi_sym, s_sym, theta_sym, Bx_sym, By_sym, Bz_sym, gBx_sym, gBy_sym, gBz_sym, m_mag_sym),
+    vbar_sym, modules='numpy'
+)
+
+dvbar_dtheta_fn = sp.lambdify(
+    (phi_sym, s_sym, theta_sym, Bx_sym, By_sym, Bz_sym, gBx_sym, gBy_sym, gBz_sym, m_mag_sym),
+    sp.diff(vbar_sym, theta_sym), modules='numpy'
+)
+def dmhat_dpsi(psi: float) -> np.ndarray: 
+    return np.array([np.sin(psi), np.cos(psi), 0.0], dtype=float)
+def vbar_at_tip(theta_L, p_vec, s_L, psi_ref=0.0, phi=0.0):
+    B_vec, Bg_vec = magnetic_field_dynamic2(s_L, theta_L, p_vec)
+    return float(beam_bending_integral_psi_eval(
+        phi, s_L, theta_L,
+        B_vec[0], B_vec[1], B_vec[2],
+        Bg_vec[0], Bg_vec[1], Bg_vec[2],
+        psi_ref, 8e3
+    ))
+
+def dvbar_dtheta_at_tip(theta_L, p_vec, s_L, psi_ref=0.0, phi=0.0):
+    B_vec, Bg_vec = magnetic_field_dynamic2(s_L, theta_L, p_vec, phi)
+    return float(df_dtheta_psi_fn(
+        phi, s_L, theta_L,
+        B_vec[0], B_vec[1], B_vec[2],
+        Bg_vec[0], Bg_vec[1], Bg_vec[2],
+        psi_ref, 8e3
+    ))
+
+def jacobian_tip_wrt_psi(solution_beam, psi, p_vec, *, s_L, phi):
+    dthetaL_dpsi = tip_sensitivity_with_shooting(solution_beam, psi, p_vec, phi)
+    theta_L = float(np.asarray(solution_beam.y)[0, -1])
+    _, vbar_tip, _, _ = simulate_beam(ks, s_steps, psi=0.0, p_vec=p_vec, phi=phi)
+    dvbar_dtheta_L = dvbar_dtheta_at_tip(vbar_tip, p_vec, s_L, psi_ref=0.0)
+    m_hat = m_dir_from_psi(psi, phi)
+    return (dvbar_dtheta_L * dthetaL_dpsi) * m_hat + vbar_tip * dmhat_dpsi(psi)
+
+
+
+
+
+
 if __name__ == "__main__":
     # %%
 
@@ -234,224 +393,6 @@ if __name__ == "__main__":
     print(dR_dtheta_mpsi)
     beam_bending_integral_psi = (dR_dtheta_mpsi.T @ B_vec_sym)[0] + (dx_dtheta.T @ Bg_vec_sym)[0]
 
-    beam_bending_integral_psi_eval = sp.lambdify(
-        (phi_sym, s_sym, theta_sym, Bx_sym, By_sym, Bz_sym,
-        gBx_sym, gBy_sym, gBz_sym, psi_sym, m_mag_sym),
-        beam_bending_integral_psi, modules='numpy'
-    )
-
-    df_dtheta_psi_fn = sp.lambdify(
-        (phi_sym, s_sym, theta_sym, Bx_sym, By_sym, Bz_sym,
-        gBx_sym, gBy_sym, gBz_sym, psi_sym, m_mag_sym),
-        sp.diff(beam_bending_integral_psi, theta_sym),
-        modules='numpy'
-    )
-
-    df_dpsi_fn = sp.lambdify(
-        (phi_sym, s_sym, theta_sym, Bx_sym, By_sym, Bz_sym,
-        gBx_sym, gBy_sym, gBz_sym, psi_sym, m_mag_sym),
-        sp.diff(beam_bending_integral_psi, psi_sym),
-        modules='numpy'
-    )
-
-
-    # %% [markdown]
-    # The magnetic field is evaluated at one static point. Unlike beam mechanics 3 the field does not integrate with changing spatial gradient. This also does not depend on psi as psi is fixed and set to 0.
-
-    # %%
-    def tip_frame_m_world(theta_val, mL):
-        c, s = np.cos(theta_val), np.sin(theta_val)
-        Rz   = np.array([[c,-s,0.0],[s,c,0.0],[0.0,0.0,1.0]], float)
-        return Rz @ np.array([mL, 0.0, 0.0], float)
-    def evalulate_magnetic_field2(p_now, MAGNET_M, base_dir=np.array([-1.0,0.0,0.0])):
-        p_now = np.asarray(p_now, float)
-        m_base = np.asarray(base_dir, float)
-        m_base = np.array([-np.cos(0), np.sin(0), 0.0], dtype=float)
-        T = magnetic_field_bar(p_now, MU0, MAGNET_M)
-        B_vec = (T @ m_base).ravel()
-        test = T@np.array([1,1,1])
-        ex, ey, ez = np.eye(3)
-        Gx = -1*magnetic_field_gradient(p_now, m_base, MU0, MAGNET_M)
-        Gy = -1*magnetic_field_gradient(p_now, m_base, MU0, MAGNET_M)
-        Gz = -1*magnetic_field_gradient(p_now, m_base, MU0, MAGNET_M)
-        m_world = tip_frame_m_world(0, magnetisation)
-        G = np.column_stack([(Gx@ m_world).ravel(),
-                            (Gy@ m_world).ravel(),
-                            (Gz@ m_world).ravel()])
-        return G, test
-
-    def magnetic_field_dynamic2(s_val, theta_val, p_vec, phi, debug_field=False):
-        Rx = np.array([[1,0,0],
-                    [0, np.cos(phi), -np.sin(phi)],
-                    [0, np.sin(phi),  np.cos(phi)]], float)
-        Rm_local = np.array([-np.cos(theta_val), np.sin(theta_val), 0.0], float)
-        # Rm = Rx @ Rm_local
-        Rm = np.array([-np.cos(0), -np.sin(0), 0.0], dtype=float)
-        p_now = _as_vec3(p_vec) + float(s_val) * Rm
-        G, B_vec = evalulate_magnetic_field2(p_now, MAGNET_M)
-        # Bg_Rm = (G[1,0]).ravel()
-        Bg_Rm = (G[1,:]).ravel()
-
-        if debug_field == True:
-            print(f"Magnetic field: {B_vec}")
-            print(f"Magnetic field gradient: {Bg_Rm}")
-        return B_vec, Bg_Rm
-    p_vec = np.array([0,0.2,0])
-    phi = 0
-    test = magnetic_field_dynamic2(0, 0, p_vec, phi)
-
-    # %%
-    mag_values = []
-    grad_values = []
-    distances = np.linspace(0.1, 0.35, 100)
-
-    for py in distances:
-        p_vec = np.array([0.0, py, 0.0])
-        field = magnetic_field_bar(p_vec, MU0, MAGNET_M)
-        field_norm = np.linalg.norm(field)
-        mag_values.append(field_norm)
-
-        grad_x = magnetic_field_gradient(p_vec, np.array([0.0,1.0,0.0]), MU0, MAGNET_M )
-        grad_values.append(grad_x[1,1])
-    plt.figure()
-    plt.plot(distances, mag_values)
-    plt.title("Magnetic field vs distance")
-    plt.show()
-
-    plt.figure()
-    plt.plot(distances, grad_values)
-    plt.title("Magnetic field Gradient vs distance")
-    plt.show()
-
-    # %% [markdown]
-    # This function maps the values to the symbolic function to be integrated
-
-    # %%
-
-
-    # %% [markdown]
-    # The beam theory is solved for a static beam without influence of the rotation of the magnet. It is then rotated after it has been solved to obtain the bending for each psi. This produces less accurate but fast results. For example the rotation is symmetrical which is far from reality.
-
-    # %%
-    def sweep_tip_vs_psi(ks, s_steps, p_vec, psi_grid, phi, psi):
-        _, vbar_tip, _, _ = simulate_beam(ks, s_steps, psi, p_vec=p_vec, phi=phi)
-        tips = np.array([vbar_tip * m_dir_from_psi(psi, phi) for psi in psi_grid])
-        tip_mag = np.linalg.norm(tips, axis=1)  
-
-        plt.figure(figsize=(7,4))
-        plt.plot(psi_grid, np.rad2deg(tips[:,0]), label=r"$\vartheta_{\rm tip,x}$ [deg]")
-        plt.plot(psi_grid, np.rad2deg(tips[:,1]), label=r"$\vartheta_{\rm tip,y}$ [deg]")
-        plt.plot(psi_grid, np.rad2deg(tip_mag),  label=r"$|\vartheta_{\rm tip}|$ [deg]", linestyle=":")
-        plt.xlabel(r"$\psi$ [rad]")
-        plt.ylabel("Tip bending [degrees]")
-        plt.title("Tip bending vs ψ (p_vec fixed)")
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
-
-
-        print(f"v̄_tip (scalar) = {vbar_tip:.6g}")
-        print(f"|θ_tip(ψ)| min/max over sweep = {tip_mag.min():.6g} / {tip_mag.max():.6g}")
-    psi_grid = np.linspace(-np.pi, np.pi, 100)
-    ks = np.linspace(-500, 500, 81)
-    s_steps = 200
-    p_vec = np.array([0.0, 0.3, 0.0], float)
-    phi = 0
-    psi=0
-    sweep_tip_vs_psi(ks, s_steps, p_vec, psi_grid, phi, psi)
-
-
-    # %% [markdown]
-    # A comparison is made between the finite difference and anlytical derivation.Very similar to beam mechanics 2 the jacoibian is taken by linearising at different points and forcing the boundary conditions.
-
-    # %%
-    def f_theta_analytic(s_val, theta_val, psi, p_vec, phi):
-        B_vec, Bg_Rm = magnetic_field_dynamic2(s_val, theta_val, p_vec, phi)
-        Bx, By, Bz = map(float, np.ravel(B_vec))
-        gBx, gBy, gBz = map(float, np.ravel(Bg_Rm))
-        return -(A_val/(E_val*I_val)) * float(df_dtheta_psi_fn(
-            phi, float(s_val), float(theta_val),
-            Bx, By, Bz, gBx, gBy, gBz,
-            float(psi), magnetisation
-        ))
-
-    def f_psi_analytic(s_val, theta_val, psi, p_vec, phi):
-        B_vec, Bg_Rm = magnetic_field_dynamic2(s_val, theta_val, p_vec, phi)
-        Bx, By, Bz = map(float, np.ravel(B_vec))
-        gBx, gBy, gBz = map(float, np.ravel(Bg_Rm))
-        return -(A_val/(E_val*I_val)) * float(df_dpsi_fn(
-            phi, float(s_val), float(theta_val),
-            Bx, By, Bz, gBx, gBy, gBz,
-            float(psi), magnetisation
-        ))
-
-
-    # %%
-    def tip_sensitivity_with_shooting(solution_beam, psi, p_vec, phi):
-        """
-        Returns dθ(L)/dψ under the terminal constraint θ'(L)=0.
-        Integrates u and w tangents along the stored θ(s) trajectory.
-        """
-        s_grid = solution_beam.t
-        theta_grid = np.asarray(solution_beam.y)[0]
-
-        def rhs_pair(s, y):
-            theta_s = np.interp(s, s_grid, theta_grid)
-            u, u1, w, w1 = y
-            ft = f_theta_analytic(s, theta_s, psi, p_vec, phi)
-            fp = f_psi_analytic  (s, theta_s, psi, p_vec, phi)
-            return np.array([u1, ft*u + fp, w1, ft*w], dtype=float)
-
-        y0 = [0.0, 0.0, 0.0, 1.0]
-        sol = solve_ivp(rhs_pair, (s_grid[0], s_grid[-1]), y0, t_eval=[s_grid[-1]], max_step=LENGTH/800)
-        U = np.asarray(sol.y)[:, -1]
-        uL, u1L, wL, w1L = map(float, U)
-
-        dk_dpsi = - u1L / (w1L + 1e-12)
-        dthetaL_dpsi = uL + wL * dk_dpsi
-        return dthetaL_dpsi
-
-
-    # %%
-    mhat_ref_sym = sp.Matrix([-1, 0, 0])     
-    vbar_sym = ((dR_dtheta * (m_mag_sym * mhat_ref_sym)).T @ B_vec_sym)[0] + (dx_dtheta.T @ Bg_vec_sym)[0]
-
-    vbar_eval_fn = sp.lambdify(
-        (phi_sym, s_sym, theta_sym, Bx_sym, By_sym, Bz_sym, gBx_sym, gBy_sym, gBz_sym, m_mag_sym),
-        vbar_sym, modules='numpy'
-    )
-
-    dvbar_dtheta_fn = sp.lambdify(
-        (phi_sym, s_sym, theta_sym, Bx_sym, By_sym, Bz_sym, gBx_sym, gBy_sym, gBz_sym, m_mag_sym),
-        sp.diff(vbar_sym, theta_sym), modules='numpy'
-    )
-    def dmhat_dpsi(psi: float) -> np.ndarray: 
-        return np.array([np.sin(psi), np.cos(psi), 0.0], dtype=float)
-    def vbar_at_tip(theta_L, p_vec, s_L, psi_ref=0.0, phi=phi):
-        B_vec, Bg_vec = magnetic_field_dynamic2(s_L, theta_L, p_vec)
-        return float(beam_bending_integral_psi_eval(
-            phi, s_L, theta_L,
-            B_vec[0], B_vec[1], B_vec[2],
-            Bg_vec[0], Bg_vec[1], Bg_vec[2],
-            psi_ref, 8e3
-        ))
-
-    def dvbar_dtheta_at_tip(theta_L, p_vec, s_L, psi_ref=0.0, phi=phi):
-        B_vec, Bg_vec = magnetic_field_dynamic2(s_L, theta_L, p_vec, phi)
-        return float(df_dtheta_psi_fn(
-            phi, s_L, theta_L,
-            B_vec[0], B_vec[1], B_vec[2],
-            Bg_vec[0], Bg_vec[1], Bg_vec[2],
-            psi_ref, 8e3
-        ))
-
-    def jacobian_tip_wrt_psi(solution_beam, psi, p_vec, *, s_L, phi):
-        dthetaL_dpsi = tip_sensitivity_with_shooting(solution_beam, psi, p_vec, phi)
-        theta_L = float(np.asarray(solution_beam.y)[0, -1])
-        _, vbar_tip, _, _ = simulate_beam(ks, s_steps, psi=0.0, p_vec=p_vec, phi=phi)
-        dvbar_dtheta_L = dvbar_dtheta_at_tip(vbar_tip, p_vec, s_L, psi_ref=0.0)
-        m_hat = m_dir_from_psi(psi, phi)
-        return (dvbar_dtheta_L * dthetaL_dpsi) * m_hat + vbar_tip * dmhat_dpsi(psi)
 
 
     # %%

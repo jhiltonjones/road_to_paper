@@ -87,16 +87,17 @@ df_dgBz_fn = smp.lambdify(
 
 # %%
 def simulate_beam(
-    p_vec, psi, *,
-    L, A_val, E_val, I_val,
-    MU0, MAGNET_M,
-    m_line_of_s,                
+    p_vec, psi_deg, *,
+    L=LENGTH, A_val, E_val, I_val,
+    MU0=MU0, MAGNET_M=MAGNET_M,
+    m_line_of_s = m_line_of_s,                
     GRAD_SCALE=1.0,
     s_steps=400,
     k_bounds=(-500.0, 500.0),
     k_grid=81,
     field_at_tip = False
 ):
+    psi = np.deg2rad(psi_deg)
     m_ext_dir = np.array([np.cos(psi), np.sin(psi), 0.0], dtype=float)
     m_ext_dir_sec = np.array([np.cos(psi), np.sin(psi), 0.0], dtype=float)
 
@@ -197,9 +198,9 @@ def simulate_beam(
 # %%
 def jacobian_tip_from_sim2(
     p_vec, psi_rad, *,
-    L, A_val, E_val, I_val,
-    MU0, MAGNET_M,
-    m_line_of_s,
+    L=LENGTH, A_val, E_val, I_val,
+    MU0=MU0, MAGNET_M=MAGNET_M,
+    m_line_of_s=m_line_of_s,
     GRAD_SCALE=1.0, s_steps=400,
     h_deg=0.1,
 ):
