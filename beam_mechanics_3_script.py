@@ -203,13 +203,20 @@ def jacobian_tip_from_sim2(
     m_line_of_s=m_line_of_s,
     GRAD_SCALE=1.0, s_steps=400,
     h_deg=0.1,
+    sim=None
 ):
-    theta_tip, _, sol_ivp, info = simulate_beam(
-        p_vec, psi_rad,
-        L=LENGTH, A_val=A_val, E_val=E_val, I_val=I_val,
-        MU0=MU0, MAGNET_M=MAGNET_M,
-        m_line_of_s=m_line_of_s, GRAD_SCALE=GRAD_SCALE, s_steps=s_steps
-    )
+    if sim is not None:
+        theta_tip = float(sim['theta_tip'])
+        sol_ivp   = sim['sol_ivp']
+        info      = sim['info']
+    else:
+        pass
+        # theta_tip, _, sol_ivp, info = simulate_beam(
+        #     p_vec, np.degrees(psi_rad),
+        #     L=L, A_val=A_val, E_val=E_val, I_val=I_val,
+        #     MU0=MU0, MAGNET_M=MAGNET_M,
+        #     m_line_of_s=m_line_of_s, GRAD_SCALE=GRAD_SCALE, s_steps=s_steps
+        # )
 
     s_grid    = sol_ivp.t
     theta_nom = sol_ivp.y[0]
