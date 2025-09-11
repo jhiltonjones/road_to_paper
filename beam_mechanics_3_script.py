@@ -93,8 +93,8 @@ def simulate_beam(
     m_line_of_s = m_line_of_s,                
     GRAD_SCALE=1.0,
     s_steps=400,
-    k_bounds=(-500.0, 500.0),
-    k_grid=81,
+    k_bounds=(-100.0, 100.0),
+    k_grid=41,
     field_at_tip = False
 ):
     psi = np.deg2rad(psi_deg)
@@ -170,7 +170,7 @@ def simulate_beam(
         k_star = float(res.root) if res.converged else float(0.5*(k_a+k_b))
 
     s_grid = np.linspace(0.0, L, int(s_steps))
-    sol_ivp = solve_ivp(rhs, (0.0, L), y0=[0.0, k_star], t_eval=s_grid, max_step=L/400)
+    sol_ivp = solve_ivp(rhs, (0.0, L), y0=[0.0, k_star], t_eval=s_grid, max_step=L/100)
     theta_tip = float(sol_ivp.y[0, -1])
 
     m_line_base = m_line_of_s(0.0)
@@ -205,18 +205,17 @@ def jacobian_tip_from_sim2(
     h_deg=0.1,
     sim=None
 ):
-    if sim is not None:
-        theta_tip = float(sim['theta_tip'])
-        sol_ivp   = sim['sol_ivp']
-        info      = sim['info']
+    if sim is not None and isinstance(sim, dict) and ("sol_ivp" in sim):
+        sol_ivp = sim["sol_ivp"]
+        theta_tip = float(sol_ivp.y[0, -1]) if "theta_tip" not in sim else float(sim["theta_tip"])
+        info = sim.get("info", {})
     else:
-        pass
-        # theta_tip, _, sol_ivp, info = simulate_beam(
-        #     p_vec, np.degrees(psi_rad),
-        #     L=L, A_val=A_val, E_val=E_val, I_val=I_val,
-        #     MU0=MU0, MAGNET_M=MAGNET_M,
-        #     m_line_of_s=m_line_of_s, GRAD_SCALE=GRAD_SCALE, s_steps=s_steps
-        # )
+        theta_tip, _, sol_ivp, info = simulate_beam(
+            p_vec, np.rad2deg(psi_rad),
+            L=L, A_val=A_val, E_val=E_val, I_val=I_val,
+            MU0=MU0, MAGNET_M=MAGNET_M,
+            m_line_of_s=m_line_of_s, GRAD_SCALE=GRAD_SCALE, s_steps=s_steps
+        )
 
     s_grid    = sol_ivp.t
     theta_nom = sol_ivp.y[0]
